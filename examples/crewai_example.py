@@ -1,83 +1,71 @@
 """
 Agent Watchdog + CrewAI integration example.
 
-CrewAI doesn't expose a direct callback interface for individual tool calls,
-so we wrap at the crew.kickoff() level for budget and timeout protection.
-For loop detection, subclass BaseTool.
+CrewAI issue #4495: tool wrapper regression causes infinite tool-call loop.
+This example shows how to wrap CrewAI tool execution with watchdog protection.
 """
 from agent_watchdog import AgentWatchdog, WatchdogHalt
 
 watchdog = AgentWatchdog(
-    max_budget_usd=1.0,
+    max_budget_usd=1.00,
     max_identical_calls=3,
     timeout_seconds=300,
     model="anthropic/claude-sonnet-4-6",
 )
 
-# --- Tool wrapper for loop detection ---
-try:
-    from crewai.tools import BaseTool
 
-    class WatchdogTool(BaseTool):
-        """
-        Mixin: wrap any CrewAI tool to report calls to watchdog.
-
-        Usage:
-            class MySearchTool(WatchdogTool):
-                name = "search"
-                description = "Search the web"
-                _watchdog: AgentWatchdog = None
-
-                def _run(self, query: str) -> str:
-                    return search_api(query)
-
-            tool = MySearchTool()
-            tool._watchdog = watchdog
-        """
-        _watchdog: object = None
-
-        def _run(self, *args, **kwargs):
-            raise NotImplementedError
-
-        def run(self, *args, **kwargs):
-            if self._watchdog:
-                self._watchdog.record_tool_call(
-                    self.name,
-                    args=str(args) + str(kwargs),
-                )
-            return super().run(*args, **kwargs)
-
-except ImportError:
-    print("crewai not installed. Install with: pip install crewai")
-    WatchdogTool = None
-
-
-# --- Example usage ---
-def run_crew_with_watchdog(crew, run_id: str = "crew-run"):
+# --- Option A: Wrap the entire crew.kickoff() call ---
+def run_crew_with_watchdog(crew, inputs: dict):
     """
-    Run a CrewAI Crew with watchdog timeout and budget protection.
-
-    Args:
-        crew: A CrewAI Crew instance
-        run_id: Identifier for this run
-
-    Returns:
-        Crew result, or None if halted
-
-    Example:
-        result = run_crew_with_watchdog(my_crew, "research-crew-001")
+    Simplest integration: wrap the full crew run.
+    Catches runaway loops via timeout. Does not do per-tool loop detection.
     """
     try:
-        with watchdog.watch(run_id=run_id):
-            result = crew.kickoff()
+        with watchdog.watch(run_id="crew-run"):
+            result = crew.kickoff(inputs=inputs)
             return result
     except WatchdogHalt as e:
-        r = e.report
-        print(f"\n[CREW HALTED] reason={r.reason.value} "
-              f"cost=${r.estimated_cost_usd:.4f} after {r.elapsed_seconds:.1f}s")
+        print(f"[Watchdog] Crew halted: {e.report.reason}")
+        print(f"[Watchdog] Elapsed: {e.report.elapsed_seconds:.1f}s")
+        print(f"[Watchdog] Estimated cost: ${e.report.estimated_cost_usd:.4f}")
         return None
 
 
+# --- Option B: Wrap individual BaseTool._run() for loop detection ---
+# This is the pattern that CrewAI issue #4495 broke.
+# Wrap your tools to report to watchdog:
+
+# from crewai.tools import BaseTool
+#
+# class WatchedTool(BaseTool):
+#     name: str = "watched_tool"
+#     description: str = "A tool monitored by Agent Watchdog"
+#
+#     def _run(self, query: str) -> str:
+#         result = self._do_work(query)
+#         watchdog.record_tool_call(self.name, args=query, output=result)
+#         return result
+#
+#     def _do_work(self, query: str) -> str:
+#         # actual tool logic here
+#         return f"result for {query}"
+
+
+# --- Demo ---
 if __name__ == "__main__":
-    print("Agent Watchdog CrewAI example")
-    print("pip install agent-watchdog crewai")
+    print("Agent Watchdog + CrewAI demo\n")
+
+    # Simulate CrewAI issue #4495: tool called with no args forever
+    print("Simulating issue #4495: infinite tool loop with empty args")
+    try:
+        with watchdog.watch(run_id="crewai-bug-4495"):
+            for i in range(10):
+                # Tool called with no meaningful args — this is what the bug causes
+                watchdog.record_tool_call("BedrockKBRetrieverTool", args=None)
+                print(f"  Tool call {i+1} (no args)")
+    except WatchdogHalt as e:
+        print(f"\n  ✓ Would have been caught: {e.report.reason}")
+        print(f"  ✓ After {len(e.report.tool_calls)} calls")
+        print(f"  ✓ {e.report.message}\n")
+
+    print("With Agent Watchdog, this loop is caught at call 3 instead of running forever.")
