@@ -1,68 +1,63 @@
 """
 Agent Watchdog + CrewAI integration example.
 
-Addresses CrewAI issue #4495: infinite tool-use loop regression.
-Addresses CrewAI issue #4132: token tracking enhancement.
+CrewAI's main failure mode: tool wrapper regressions that cause infinite loops.
+This example shows how to catch that with watchdog.
 """
 from agent_watchdog import AgentWatchdog, WatchdogHalt, HaltReason
 
 watchdog = AgentWatchdog(
     max_budget_usd=1.0,
-    max_identical_calls=3,   # catches the infinite loop regression
-    timeout_seconds=300,
+    max_identical_calls=3,   # catches the crewai regression pattern
+    timeout_seconds=180,
     model="anthropic/claude-sonnet-4-6",
 )
 
-# Option 1: Wrap the entire crew.kickoff() call (simplest)
-def run_crew_with_watchdog(crew, inputs: dict):
-    """
-    Drop-in replacement for crew.kickoff().
-    Protects against infinite loops and cost overruns.
-    """
+
+# CrewAI tool wrapper pattern — record each tool invocation
+class WatchedTool:
+    """Mixin for CrewAI tools to report into the watchdog."""
+
+    def _run(self, *args, **kwargs):
+        result = self._execute(*args, **kwargs)
+        watchdog.record_tool_call(
+            tool_name=self.__class__.__name__,
+            args=str(args) + str(kwargs),
+            output=str(result)[:200],
+        )
+        return result
+
+    def _execute(self, *args, **kwargs):
+        raise NotImplementedError
+
+
+# Example tool
+class SearchTool(WatchedTool):
+    name = "search"
+    description = "Search for information"
+
+    def _execute(self, query: str) -> str:
+        # your implementation
+        return f"results for {query}"
+
+
+# Run a crew with watchdog protection
+def run_crew(task: str):
     try:
-        with watchdog.watch(run_id="crew-run"):
-            result = crew.kickoff(inputs=inputs)
-            return result
+        with watchdog.watch(run_id="crewai-run"):
+            # your crew.kickoff() call goes here
+            # the WatchedTool mixin will record each tool call
+            tool = SearchTool()
+            for _ in range(20):
+                tool._run(query=task)         # will loop-detect at call 3+1
+                watchdog.record_tokens(800, 200)
+
     except WatchdogHalt as e:
-        report = e.report
-        if report.reason == HaltReason.LOOP_DETECTED:
-            print(f"[Watchdog] Infinite loop detected after {len(report.tool_calls)} calls")
-            print(f"[Watchdog] Last output: {report.last_output}")
-        elif report.reason == HaltReason.BUDGET_EXCEEDED:
-            print(f"[Watchdog] Budget exceeded: ${report.estimated_cost_usd:.4f}")
-        return {"error": report.reason, "report": report}
+        r = e.report
+        print(f"Crew halted: {r.reason.value} | cost=${r.estimated_cost_usd:.4f} | calls={len(r.tool_calls)}")
+        # log to your monitoring system here
+        return {"status": "halted", "report": r}
 
 
-# Option 2: Custom CrewAI tool wrapper with per-call tracking
-# from crewai.tools import BaseTool
-#
-# class WatchdogTool(BaseTool):
-#     """Wraps any CrewAI tool with watchdog monitoring."""
-#     name: str
-#     description: str
-#     wrapped_tool: BaseTool
-#     watchdog: AgentWatchdog
-#
-#     def _run(self, *args, **kwargs):
-#         # Record the call before executing
-#         self.watchdog.record_tool_call(
-#             self.name,
-#             args=str(args) + str(kwargs)
-#         )
-#         result = self.wrapped_tool._run(*args, **kwargs)
-#         self.watchdog.record_tool_call(
-#             self.name,
-#             args=str(args) + str(kwargs),
-#             output=str(result)
-#         )
-#         return result
-
-
-# Usage example:
-# from crewai import Agent, Task, Crew
-#
-# researcher = Agent(role="Researcher", goal="...", backstory="...")
-# task = Task(description="Research AI trends", agent=researcher)
-# crew = Crew(agents=[researcher], tasks=[task])
-#
-# result = run_crew_with_watchdog(crew, inputs={"topic": "AI agents"})
+if __name__ == "__main__":
+    run_crew("research AI agent infrastructure")
