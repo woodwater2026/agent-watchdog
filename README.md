@@ -1,5 +1,8 @@
 # agent-watchdog
 
+[![PyPI version](https://badge.fury.io/py/agent-watchdog.svg)](https://pypi.org/project/agent-watchdog/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A circuit breaker for AI agent runs.
 
 **Loop detection. Real-time budget guards. Graceful halts.**
