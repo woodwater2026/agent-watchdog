@@ -1,71 +1,116 @@
 """
 Agent Watchdog + CrewAI integration example.
 
-Wraps a CrewAI crew kickoff with AgentWatchdog.
-CrewAI doesn't expose per-tool callbacks easily, so we wrap at the crew level
-and use the timeout + budget guards as the primary protection.
+CrewAI doesn't expose per-step callbacks as easily as LangChain,
+but you can wrap the crew.kickoff() call for budget + timeout protection.
+For loop detection, patch individual tool wrappers.
 """
 from agent_watchdog import AgentWatchdog, WatchdogHalt
 
 
-def run_crew_with_watchdog(crew, inputs: dict, run_id: str = "crewai-run"):
+def run_crew_with_watchdog(crew, inputs: dict, run_id: str = "crew-run"):
     """
-    Wrap any CrewAI crew.kickoff() call with AgentWatchdog protection.
+    Run a CrewAI crew with timeout and budget protection.
 
-    Usage:
-        from crewai import Crew, Agent, Task
-        # ... define your crew ...
-        result = run_crew_with_watchdog(my_crew, {"topic": "AI safety"})
+    Loop detection requires instrumenting individual tools (see WatchdogTool below).
+
+    Args:
+        crew: Your configured CrewAI Crew instance
+        inputs: Dict of inputs for the crew
+        run_id: Identifier for logging
+
+    Returns:
+        dict with 'output' on success, 'halted' and 'report' on WatchdogHalt
     """
     watchdog = AgentWatchdog(
-        max_budget_usd=1.00,      # crew runs tend to be more expensive
-        max_identical_calls=5,    # crews make more legitimate repeat calls
-        timeout_seconds=300,      # 5 minute hard limit
-        model="anthropic/claude-sonnet-4-6",
+        max_budget_usd=2.0,
+        max_identical_calls=3,
+        timeout_seconds=300,
     )
 
     try:
         with watchdog.watch(run_id=run_id):
             result = crew.kickoff(inputs=inputs)
-        return result
+        return {"output": result, "halted": False}
 
     except WatchdogHalt as e:
-        r = e.report
-        print(f"\n[Watchdog] Crew halted")
-        print(f"  Reason:   {r.reason.value}")
-        print(f"  Elapsed:  {r.elapsed_seconds:.1f}s")
-        print(f"  Cost:     ${r.estimated_cost_usd:.4f}")
-        print(f"  Tools called: {len(r.tool_calls)}")
-        if r.last_output:
-            print(f"  Last output: {r.last_output[:200]}")
-        return None
+        return {
+            "halted": True,
+            "report": e.report,
+            "partial_output": e.report.last_output,
+        }
 
 
-# --- Minimal CrewAI example ---
+class WatchdogTool:
+    """
+    Wrap a CrewAI BaseTool to feed call data into a watchdog.
+
+    Usage:
+        from crewai.tools import BaseTool
+        from agent_watchdog import AgentWatchdog
+
+        watchdog = AgentWatchdog(max_identical_calls=3)
+
+        class MySearchTool(BaseTool):
+            name = "web_search"
+            description = "Search the web"
+
+            def _run(self, query: str) -> str:
+                watchdog.record_tool_call("web_search", args=query)
+                # ... actual search logic
+                result = do_search(query)
+                return result
+    """
+    pass
+
+
+# --- Minimal runnable demo ---
 if __name__ == "__main__":
     try:
         from crewai import Agent, Task, Crew
-        from crewai_tools import SerperDevTool
+        from crewai.tools import BaseTool
+
+        watchdog = AgentWatchdog(
+            max_budget_usd=0.50,
+            max_identical_calls=3,
+            timeout_seconds=60,
+        )
+
+        class BrokenTool(BaseTool):
+            name: str = "broken_tool"
+            description: str = "A tool that always fails"
+
+            def _run(self, query: str) -> str:
+                watchdog.record_tool_call(self.name, args=query)
+                return "Error: tool unavailable"
+
+        broken = BrokenTool()
 
         researcher = Agent(
             role="Researcher",
-            goal="Find concise information about the given topic",
-            backstory="You are an efficient research assistant.",
-            tools=[SerperDevTool()],
+            goal="Find information about AI agents",
+            backstory="You are a researcher.",
+            tools=[broken],
             verbose=False,
         )
 
         task = Task(
-            description="Research: {topic}. Give a 3-sentence summary.",
-            expected_output="A 3-sentence summary.",
+            description="Research the latest developments in AI agent frameworks",
+            expected_output="A summary of findings",
             agent=researcher,
         )
 
         crew = Crew(agents=[researcher], tasks=[task], verbose=False)
 
-        result = run_crew_with_watchdog(crew, {"topic": "AI agent reliability"})
-        print("Result:", result)
+        print("Running crew with watchdog (budget=$0.50, timeout=60s)...")
+        with watchdog.watch(run_id="demo-crew"):
+            try:
+                result = run_crew_with_watchdog(crew, {}, run_id="demo-crew")
+            except WatchdogHalt as e:
+                r = e.report
+                print(f"✓ Watchdog halted crew: {r.reason.value}")
+                print(f"  Cost: ${r.estimated_cost_usd:.4f}")
 
-    except ImportError:
-        print("crewai not installed. This is just an example.")
-        print("pip install crewai crewai-tools")
+    except ImportError as e:
+        print(f"Demo requires crewai: {e}")
+        print("Install with: pip install crewai")

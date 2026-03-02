@@ -1,111 +1,115 @@
 """
 Agent Watchdog + LangChain integration example.
 
-Shows how to wrap a LangChain agent with AgentWatchdog for loop detection,
-budget guards, and graceful halts.
+Shows how to wrap a LangChain agent with loop detection and budget guard.
+The key is using a custom callback to feed tool call data into the watchdog.
 """
+from langchain.agents import AgentExecutor
+from langchain.callbacks.base import BaseCallbackHandler
 from agent_watchdog import AgentWatchdog, WatchdogHalt
 
-# ── LangChain imports (install: pip install langchain langchain-openai) ──────
-# from langchain.agents import AgentExecutor, create_react_agent
-# from langchain_openai import ChatOpenAI
-# from langchain.tools import tool
 
-# ── Example: wrapping an AgentExecutor ───────────────────────────────────────
+class WatchdogCallback(BaseCallbackHandler):
+    """LangChain callback that feeds tool usage into AgentWatchdog."""
 
-def run_with_watchdog(agent_executor, task: str, run_id: str = "lc-run"):
+    def __init__(self, watchdog: AgentWatchdog):
+        self.watchdog = watchdog
+
+    def on_tool_start(self, serialized, input_str, **kwargs):
+        tool_name = serialized.get("name", "unknown_tool")
+        self.watchdog.record_tool_call(tool_name, args=input_str)
+
+    def on_tool_end(self, output, **kwargs):
+        # Update last output
+        if self.watchdog._current_run:
+            self.watchdog._current_run.last_output = str(output)[:500]
+
+    def on_llm_end(self, response, **kwargs):
+        # Record token usage from LLM response
+        usage = getattr(response, "llm_output", {}) or {}
+        token_usage = usage.get("token_usage", {})
+        self.watchdog.record_tokens(
+            token_in=token_usage.get("prompt_tokens", 0),
+            token_out=token_usage.get("completion_tokens", 0),
+        )
+
+
+def run_with_watchdog(agent_executor: AgentExecutor, task: str, run_id: str = "run"):
     """
-    Run a LangChain AgentExecutor under AgentWatchdog supervision.
-    
-    The watchdog hooks into LangChain's callback system to:
-    - Record each tool call (for loop detection)
-    - Track token usage (for budget enforcement)
-    - Enforce a timeout
+    Run a LangChain AgentExecutor with watchdog protection.
+
+    Args:
+        agent_executor: Your configured LangChain AgentExecutor
+        task: The task string to run
+        run_id: Identifier for this run (for logging)
+
+    Returns:
+        dict with 'output' on success, 'halted' and 'report' on WatchdogHalt
+
+    Example:
+        result = run_with_watchdog(agent, "research the top 5 AI papers this week")
+        if result.get("halted"):
+            print(f"Agent halted: {result['report'].reason}")
+        else:
+            print(result["output"])
     """
     watchdog = AgentWatchdog(
         max_budget_usd=1.0,
         max_identical_calls=3,
         timeout_seconds=120,
-        model="openai/gpt-4o",
     )
-
-    class WatchdogCallback:
-        """LangChain callback handler that feeds data to the watchdog."""
-
-        def on_tool_start(self, serialized, input_str, **kwargs):
-            tool_name = serialized.get("name", "unknown")
-            watchdog.record_tool_call(tool_name, args=input_str)
-
-        def on_tool_end(self, output, **kwargs):
-            pass  # output recorded on next tool_start via last_output
-
-        def on_llm_end(self, response, **kwargs):
-            # Record token usage from LangChain's LLMResult
-            if hasattr(response, "llm_output") and response.llm_output:
-                usage = response.llm_output.get("token_usage", {})
-                watchdog.record_tokens(
-                    token_in=usage.get("prompt_tokens", 0),
-                    token_out=usage.get("completion_tokens", 0),
-                )
+    callback = WatchdogCallback(watchdog)
 
     try:
         with watchdog.watch(run_id=run_id):
             result = agent_executor.invoke(
                 {"input": task},
-                config={"callbacks": [WatchdogCallback()]},
+                config={"callbacks": [callback]},
             )
-            return result
+        return {"output": result.get("output"), "halted": False}
+
     except WatchdogHalt as e:
-        report = e.report
-        print(f"\n⚠️  Agent halted: {report.reason.value}")
-        print(f"   Cost incurred: ${report.estimated_cost_usd:.4f}")
-        print(f"   Tool calls made: {len(report.tool_calls)}")
-        print(f"   Last output: {report.last_output}")
-        return {"error": report.reason.value, "report": report}
+        return {
+            "halted": True,
+            "report": e.report,
+            "partial_output": e.report.last_output,
+        }
 
 
-# ── Minimal demo (no real LLM needed) ────────────────────────────────────────
-
-def demo_loop_detection():
-    """Simulates an agent stuck in a loop."""
-    watchdog = AgentWatchdog(max_identical_calls=3, timeout_seconds=10)
-
-    try:
-        with watchdog.watch(run_id="demo-loop"):
-            # Simulate an agent calling the same tool 3x with same args
-            for i in range(5):
-                watchdog.record_tool_call("web_search", args="latest AI news")
-                print(f"  Step {i+1}: called web_search('latest AI news')")
-    except WatchdogHalt as e:
-        print(f"\n✓ Loop detected and halted: {e.report.message}")
-        print(f"  Calls before halt: {len(e.report.tool_calls)}")
-
-
-def demo_budget_guard():
-    """Simulates a run exceeding budget."""
-    watchdog = AgentWatchdog(
-        max_budget_usd=0.05,
-        model="openai/gpt-4o",
-    )
-
-    try:
-        with watchdog.watch(run_id="demo-budget"):
-            watchdog.record_tokens(token_in=5000, token_out=1000)   # ~$0.022
-            print("  Step 1: 5k in / 1k out tokens logged")
-            watchdog.record_tokens(token_in=5000, token_out=1000)   # ~$0.044 total → over $0.05
-            print("  Step 2: 5k in / 1k out tokens logged")
-    except WatchdogHalt as e:
-        print(f"\n✓ Budget exceeded: {e.report.message}")
-        print(f"  Estimated cost: ${e.report.estimated_cost_usd:.4f}")
-
-
+# --- Minimal runnable demo (requires langchain + openai) ---
 if __name__ == "__main__":
-    print("=== Demo: Loop Detection ===")
-    demo_loop_detection()
+    try:
+        from langchain_openai import ChatOpenAI
+        from langchain.agents import create_react_agent, AgentExecutor
+        from langchain_core.tools import tool
+        from langchain import hub
 
-    print("\n=== Demo: Budget Guard ===")
-    demo_budget_guard()
+        call_count = 0
 
-    print("\n=== LangChain integration: see run_with_watchdog() above ===")
-    print("Usage:")
-    print("  result = run_with_watchdog(agent_executor, 'your task here')")
+        @tool
+        def broken_search(query: str) -> str:
+            """Search for information. Always returns an error."""
+            global call_count
+            call_count += 1
+            return "Error: search service unavailable"
+
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        prompt = hub.pull("hwchase17/react")
+        agent = create_react_agent(llm, [broken_search], prompt)
+        executor = AgentExecutor(agent=agent, tools=[broken_search], verbose=False)
+
+        print("Running agent with a broken tool (should loop and be halted)...")
+        result = run_with_watchdog(executor, "find information about LangChain", run_id="demo")
+
+        if result["halted"]:
+            r = result["report"]
+            print(f"✓ Watchdog halted the agent: {r.reason.value}")
+            print(f"  Tool calls made: {len(r.tool_calls)}")
+            print(f"  Estimated cost: ${r.estimated_cost_usd:.4f}")
+            print(f"  Elapsed: {r.elapsed_seconds:.1f}s")
+        else:
+            print(f"Agent completed: {result['output']}")
+
+    except ImportError as e:
+        print(f"Demo requires langchain-openai: {e}")
+        print("Install with: pip install langchain langchain-openai")
