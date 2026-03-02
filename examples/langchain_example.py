@@ -1,70 +1,70 @@
 """
 Agent Watchdog + LangChain integration example.
 
-Shows how to wrap a LangChain agent with watchdog protection.
+This shows how to use AgentWatchdog with a LangChain agent by wrapping
+the agent executor and recording tool calls via a custom callback.
 """
 from agent_watchdog import AgentWatchdog, WatchdogHalt
 
-# --- Setup (replace with your actual LangChain agent) ---
-# from langchain.agents import AgentExecutor, create_react_agent
-# from langchain_openai import ChatOpenAI
-# agent_executor = AgentExecutor(agent=..., tools=[...])
-
-# --- Watchdog wrapper ---
+# --- Setup ---
 watchdog = AgentWatchdog(
-    max_budget_usd=0.50,      # halt if this run exceeds $0.50
-    max_identical_calls=3,    # halt if same tool called 3x identically
-    timeout_seconds=120,      # halt after 2 minutes
+    max_budget_usd=0.50,
+    max_identical_calls=3,
+    timeout_seconds=120,
     model="openai/gpt-4o",
 )
 
-def run_with_watchdog(task: str, run_id: str = "langchain-run"):
+# --- LangChain callback to feed watchdog ---
+try:
+    from langchain.callbacks.base import BaseCallbackHandler
+
+    class WatchdogCallback(BaseCallbackHandler):
+        def __init__(self, watchdog: AgentWatchdog):
+            self.watchdog = watchdog
+
+        def on_tool_start(self, serialized, input_str, **kwargs):
+            tool_name = serialized.get("name", "unknown_tool")
+            self.watchdog.record_tool_call(tool_name, args=input_str)
+
+        def on_llm_end(self, response, **kwargs):
+            # Approximate token usage from LLM response
+            usage = getattr(response, "llm_output", {}) or {}
+            token_usage = usage.get("token_usage", {})
+            self.watchdog.record_tokens(
+                token_in=token_usage.get("prompt_tokens", 0),
+                token_out=token_usage.get("completion_tokens", 0),
+            )
+
+except ImportError:
+    print("LangChain not installed. Install with: pip install langchain")
+    WatchdogCallback = None
+
+
+# --- Usage ---
+def run_with_watchdog(agent_executor, task: str, run_id: str = "run"):
+    """
+    Run a LangChain agent executor with watchdog protection.
+    Returns (result, None) on success, (None, report) on halt.
+    """
+    if WatchdogCallback is None:
+        raise ImportError("LangChain required")
+
+    callback = WatchdogCallback(watchdog)
+
     try:
         with watchdog.watch(run_id=run_id):
-            # Option A: simple wrap (timeout + budget only)
-            result = agent_executor.invoke({"input": task})
-            return result
-
+            result = agent_executor.invoke(
+                {"input": task},
+                config={"callbacks": [callback]},
+            )
+            return result, None
     except WatchdogHalt as e:
-        report = e.report
-        print(f"\n[HALTED] reason={report.reason.value}")
-        print(f"  elapsed: {report.elapsed_seconds:.1f}s")
-        print(f"  cost: ${report.estimated_cost_usd:.4f}")
-        print(f"  calls: {len(report.tool_calls)}")
-        print(f"  last output: {report.last_output}")
-        return None
+        print(f"Agent halted: {e.report.reason} after ${e.report.estimated_cost_usd:.4f}")
+        return None, e.report
 
 
-# --- Option B: record tool calls for loop detection ---
-# Patch the agent's tool-calling mechanism to record each call.
-# LangChain uses callbacks for this.
-
-from typing import Any, Union
-# from langchain.callbacks.base import BaseCallbackHandler
-
-class WatchdogCallback:  # (BaseCallbackHandler)
-    """LangChain callback that feeds tool calls into the watchdog."""
-
-    def __init__(self, wd: AgentWatchdog):
-        self.wd = wd
-
-    def on_tool_start(self, serialized: dict, input_str: str, **kwargs):
-        tool_name = serialized.get("name", "unknown")
-        self.wd.record_tool_call(tool_name, args=input_str)
-
-    def on_llm_end(self, response: Any, **kwargs):
-        # Approximate token recording from LangChain response
-        usage = getattr(response, "llm_output", {}).get("token_usage", {})
-        self.wd.record_tokens(
-            token_in=usage.get("prompt_tokens", 0),
-            token_out=usage.get("completion_tokens", 0),
-        )
-
-
-# Usage with callback:
-# callback = WatchdogCallback(watchdog)
-# with watchdog.watch(run_id="my-run"):
-#     result = agent_executor.invoke(
-#         {"input": task},
-#         config={"callbacks": [callback]}
-#     )
+# --- Example (requires langchain + openai) ---
+if __name__ == "__main__":
+    print("LangChain + AgentWatchdog example.")
+    print("Configure your agent executor and call run_with_watchdog(executor, task).")
+    print("See README for full setup.")
