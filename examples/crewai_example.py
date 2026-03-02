@@ -1,85 +1,96 @@
 """
 Agent Watchdog + CrewAI integration example.
 
-Addresses the CrewAI issue #4495: tool wrapper regression causing infinite loops.
-With watchdog, the loop is caught after N identical calls and halted gracefully.
+Wraps a CrewAI crew with watchdog monitoring.
 """
-from agent_watchdog import AgentWatchdog, WatchdogHalt, HaltReason
+from agent_watchdog import AgentWatchdog, WatchdogHalt
 
-# --- CrewAI setup (simplified) ---
-# from crewai import Agent, Task, Crew
-# from crewai.tools import BaseTool
+# pip install agent-watchdog crewai
 
-# class MyTool(BaseTool):
-#     name: str = "search"
-#     description: str = "Search the web"
-#
-#     def _run(self, query: str) -> str:
-#         return f"Results for: {query}"
-
-# researcher = Agent(
-#     role="Researcher",
-#     goal="Research the topic thoroughly",
-#     tools=[MyTool()],
-# )
-
-# task = Task(
-#     description="Research AI agent reliability",
-#     agent=researcher,
-# )
-
-# crew = Crew(agents=[researcher], tasks=[task])
-
-# --- Watchdog integration ---
 
 watchdog = AgentWatchdog(
     max_budget_usd=1.0,
-    max_identical_calls=3,   # catches the infinite loop regression in CrewAI 1.9.3+
-    timeout_seconds=300,
+    max_identical_calls=3,
+    timeout_seconds=120,
     model="anthropic/claude-sonnet-4-6",
 )
 
 
-def run_crew_with_watchdog(crew, run_id: str = "crewai-run"):
+def run_crew_with_watchdog(crew, inputs: dict, run_id: str = "crew-run") -> dict:
     """
-    Run a CrewAI crew with watchdog protection.
+    Run a CrewAI crew with watchdog monitoring.
 
-    Specifically addresses: CrewAI issue #4495 where tool wrappers
-    enter infinite loops calling _run() with no args.
+    CrewAI doesn't expose callbacks as cleanly as LangChain,
+    so this uses the basic context manager approach.
+    For per-tool monitoring, patch your custom BaseTool subclasses
+    to call watchdog.record_tool_call() in their _run() method.
     """
     try:
         with watchdog.watch(run_id=run_id):
-            # Hook into CrewAI's step callback to record tool calls
-            # crew.step_callback = lambda step: _record_step(step)
-            # result = crew.kickoff()
-            result = "crew result"  # placeholder
-            return result
+            result = crew.kickoff(inputs=inputs)
+            return {"ok": True, "output": str(result)}
 
     except WatchdogHalt as e:
         report = e.report
-        print(f"[Watchdog] Crew halted: {report.reason.value}")
-        print(f"  Calls made: {len(report.tool_calls)}")
-        print(f"  Cost incurred: ${report.estimated_cost_usd:.4f}")
-        print(f"  Time elapsed: {report.elapsed_seconds:.1f}s")
-
-        if report.reason == HaltReason.LOOP_DETECTED:
-            # This is the CrewAI #4495 scenario
-            print(f"  Loop detected: {report.message}")
-            print("  Check your tool wrapper for the regression.")
-
-        return None
+        return {
+            "ok": False,
+            "halted": True,
+            "reason": report.reason.value,
+            "cost_usd": report.estimated_cost_usd,
+            "message": report.message,
+        }
 
 
-def _record_step(step):
-    """Hook for CrewAI step callback."""
-    if hasattr(step, "tool") and step.tool:
-        watchdog.record_tool_call(
-            tool_name=step.tool,
-            args=getattr(step, "tool_input", None),
-            output=getattr(step, "result", None),
-        )
+# --- Per-tool integration ---
+
+from crewai.tools import BaseTool
+from typing import Any
 
 
-if __name__ == "__main__":
-    # run_crew_with_watchdog(crew, run_id="research-001")
-    print("CrewAI integration example — see comments for usage")
+class WatchedTool(BaseTool):
+    """
+    Base class for CrewAI tools that auto-report to AgentWatchdog.
+    Subclass this instead of BaseTool to get loop detection for free.
+    """
+    watchdog: Any = None
+
+    def _run(self, *args, **kwargs):
+        if self.watchdog:
+            self.watchdog.record_tool_call(self.name, args=(args, kwargs))
+        return self._watched_run(*args, **kwargs)
+
+    def _watched_run(self, *args, **kwargs):
+        raise NotImplementedError
+
+
+# Example tool using WatchedTool
+class SearchTool(WatchedTool):
+    name: str = "search"
+    description: str = "Search the web."
+    watchdog: Any = watchdog
+
+    def _watched_run(self, query: str) -> str:
+        return f"Results for: {query}"
+
+
+# --- Usage example ---
+# from crewai import Agent, Task, Crew
+#
+# search_tool = SearchTool()
+#
+# researcher = Agent(
+#     role="Researcher",
+#     goal="Find relevant information",
+#     tools=[search_tool],
+#     llm="anthropic/claude-haiku-4-5",
+# )
+#
+# task = Task(
+#     description="Research the latest developments in AI agent frameworks.",
+#     agent=researcher,
+#     expected_output="A summary of findings.",
+# )
+#
+# crew = Crew(agents=[researcher], tasks=[task])
+# result = run_crew_with_watchdog(crew, inputs={}, run_id="research-001")
+# print(result)
