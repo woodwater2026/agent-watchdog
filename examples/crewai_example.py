@@ -1,63 +1,83 @@
 """
 Agent Watchdog + CrewAI integration example.
 
-CrewAI's main failure mode: tool wrapper regressions that cause infinite loops.
-This example shows how to catch that with watchdog.
+CrewAI doesn't expose a direct callback interface for individual tool calls,
+so we wrap at the crew.kickoff() level for budget and timeout protection.
+For loop detection, subclass BaseTool.
 """
-from agent_watchdog import AgentWatchdog, WatchdogHalt, HaltReason
+from agent_watchdog import AgentWatchdog, WatchdogHalt
 
 watchdog = AgentWatchdog(
     max_budget_usd=1.0,
-    max_identical_calls=3,   # catches the crewai regression pattern
-    timeout_seconds=180,
+    max_identical_calls=3,
+    timeout_seconds=300,
     model="anthropic/claude-sonnet-4-6",
 )
 
+# --- Tool wrapper for loop detection ---
+try:
+    from crewai.tools import BaseTool
 
-# CrewAI tool wrapper pattern — record each tool invocation
-class WatchedTool:
-    """Mixin for CrewAI tools to report into the watchdog."""
+    class WatchdogTool(BaseTool):
+        """
+        Mixin: wrap any CrewAI tool to report calls to watchdog.
 
-    def _run(self, *args, **kwargs):
-        result = self._execute(*args, **kwargs)
-        watchdog.record_tool_call(
-            tool_name=self.__class__.__name__,
-            args=str(args) + str(kwargs),
-            output=str(result)[:200],
-        )
-        return result
+        Usage:
+            class MySearchTool(WatchdogTool):
+                name = "search"
+                description = "Search the web"
+                _watchdog: AgentWatchdog = None
 
-    def _execute(self, *args, **kwargs):
-        raise NotImplementedError
+                def _run(self, query: str) -> str:
+                    return search_api(query)
+
+            tool = MySearchTool()
+            tool._watchdog = watchdog
+        """
+        _watchdog: object = None
+
+        def _run(self, *args, **kwargs):
+            raise NotImplementedError
+
+        def run(self, *args, **kwargs):
+            if self._watchdog:
+                self._watchdog.record_tool_call(
+                    self.name,
+                    args=str(args) + str(kwargs),
+                )
+            return super().run(*args, **kwargs)
+
+except ImportError:
+    print("crewai not installed. Install with: pip install crewai")
+    WatchdogTool = None
 
 
-# Example tool
-class SearchTool(WatchedTool):
-    name = "search"
-    description = "Search for information"
+# --- Example usage ---
+def run_crew_with_watchdog(crew, run_id: str = "crew-run"):
+    """
+    Run a CrewAI Crew with watchdog timeout and budget protection.
 
-    def _execute(self, query: str) -> str:
-        # your implementation
-        return f"results for {query}"
+    Args:
+        crew: A CrewAI Crew instance
+        run_id: Identifier for this run
 
+    Returns:
+        Crew result, or None if halted
 
-# Run a crew with watchdog protection
-def run_crew(task: str):
+    Example:
+        result = run_crew_with_watchdog(my_crew, "research-crew-001")
+    """
     try:
-        with watchdog.watch(run_id="crewai-run"):
-            # your crew.kickoff() call goes here
-            # the WatchedTool mixin will record each tool call
-            tool = SearchTool()
-            for _ in range(20):
-                tool._run(query=task)         # will loop-detect at call 3+1
-                watchdog.record_tokens(800, 200)
-
+        with watchdog.watch(run_id=run_id):
+            result = crew.kickoff()
+            return result
     except WatchdogHalt as e:
         r = e.report
-        print(f"Crew halted: {r.reason.value} | cost=${r.estimated_cost_usd:.4f} | calls={len(r.tool_calls)}")
-        # log to your monitoring system here
-        return {"status": "halted", "report": r}
+        print(f"\n[CREW HALTED] reason={r.reason.value} "
+              f"cost=${r.estimated_cost_usd:.4f} after {r.elapsed_seconds:.1f}s")
+        return None
 
 
 if __name__ == "__main__":
-    run_crew("research AI agent infrastructure")
+    print("Agent Watchdog CrewAI example")
+    print("pip install agent-watchdog crewai")
