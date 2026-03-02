@@ -1,104 +1,49 @@
 """
 Agent Watchdog + CrewAI integration example.
 
-CrewAI doesn't have a standard callback system like LangChain,
-so we wrap at the Crew.kickoff() level and use a custom BaseTool wrapper.
-
-Requirements:
-    pip install agent-watchdog crewai
+Addresses the real issue: CrewAI agents entering infinite tool-call loops.
+(See: https://github.com/crewAIInc/crewAI/issues/4495)
 """
 from agent_watchdog import AgentWatchdog, WatchdogHalt
-from crewai.tools import BaseTool
-from typing import Any
 
+# --- Setup (replace with your actual CrewAI crew) ---
+# from crewai import Agent, Task, Crew
+# crew = Crew(agents=[...], tasks=[...])
 
-class WatchdogTool(BaseTool):
-    """
-    Wraps any CrewAI BaseTool with watchdog monitoring.
-    Automatically records tool calls for loop detection.
-    """
-    name: str = "watchdog_tool"
-    description: str = ""
-    _inner: Any
-    _watchdog: Any
+watchdog = AgentWatchdog(
+    max_budget_usd=1.0,
+    max_identical_calls=3,    # the exact failure mode from CrewAI issue #4495
+    timeout_seconds=300,
+    model="anthropic/claude-sonnet-4-6",
+)
 
-    def __init__(self, tool: BaseTool, watchdog: AgentWatchdog):
-        super().__init__(
-            name=tool.name,
-            description=tool.description,
-        )
-        object.__setattr__(self, '_inner', tool)
-        object.__setattr__(self, '_watchdog', watchdog)
-
-    def _run(self, *args, **kwargs) -> str:
-        result = self._inner._run(*args, **kwargs)
-        self._watchdog.record_tool_call(self.name, args=(args, kwargs), output=result)
-        return result
-
-
-def run_crew_with_watchdog(crew, run_id: str = "crew-run", max_budget_usd: float = 1.0):
-    """
-    Run a CrewAI crew under watchdog protection.
-
-    Usage:
-        result, report = run_crew_with_watchdog(my_crew, run_id="research-task")
-    """
-    watchdog = AgentWatchdog(
-        max_budget_usd=max_budget_usd,
-        max_identical_calls=3,
-        timeout_seconds=300,
-    )
-
-    # Wrap all agent tools with WatchdogTool
-    for agent in crew.agents:
-        agent.tools = [WatchdogTool(t, watchdog) for t in agent.tools]
-
+def run_crew_safely(inputs: dict, run_id: str = "crewai-run"):
+    """Run a CrewAI crew with watchdog protection."""
     try:
         with watchdog.watch(run_id=run_id):
-            result = crew.kickoff()
-        return result, None
+            result = crew.kickoff(inputs=inputs)
+            return result
 
     except WatchdogHalt as e:
-        return None, e.report
+        r = e.report
+        print(f"\n[Watchdog stopped the crew]")
+        print(f"  Reason: {r.reason.value}")
+        print(f"  After: {r.elapsed_seconds:.0f}s, {len(r.tool_calls)} tool calls")
+        print(f"  Cost: ${r.estimated_cost_usd:.4f}")
+        if r.reason.value == "loop_detected":
+            print(f"  → Identical tool calls detected. Check your tool wrappers.")
+        return {"error": r.reason.value, "report": r}
 
 
-# --- Demo ---
-if __name__ == "__main__":
-    from crewai import Agent, Task, Crew
-    from crewai.tools import BaseTool
+# --- CrewAI callback (optional, for loop detection) ---
+# CrewAI doesn't have a standard callback interface yet.
+# Workaround: patch tool execution at the BaseTool level.
 
-    call_count = 0
-
-    class BrokenSearchTool(BaseTool):
-        name: str = "web_search"
-        description: str = "Search the web"
-
-        def _run(self, query: str) -> str:
-            global call_count
-            call_count += 1
-            return "No results. Try refining your query."
-
-    researcher = Agent(
-        role="Researcher",
-        goal="Find information about AI agent frameworks",
-        backstory="You are a meticulous researcher.",
-        tools=[BrokenSearchTool()],
-        verbose=True,
-    )
-
-    task = Task(
-        description="Research the latest developments in AI agent frameworks",
-        expected_output="A summary of current AI agent frameworks",
-        agent=researcher,
-    )
-
-    crew = Crew(agents=[researcher], tasks=[task])
-
-    print("Running crew with a broken tool...")
-    result, report = run_crew_with_watchdog(crew, run_id="demo-crew")
-
-    if report:
-        print(f"\nWatchdog caught: {report.reason.value}")
-        print(f"Calls made: {len(report.tool_calls)}")
-    else:
-        print(f"\nCrew result: {result}")
+# from crewai.tools import BaseTool
+# _original_run = BaseTool._run
+#
+# def _patched_run(self, *args, **kwargs):
+#     watchdog.record_tool_call(self.name, args=str(args))
+#     return _original_run(self, *args, **kwargs)
+#
+# BaseTool._run = _patched_run
