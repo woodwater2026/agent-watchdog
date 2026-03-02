@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: agent-watchdog
-Version: 0.1.1
+Version: 0.1.2
 Summary: A circuit breaker for AI agent runs: loop detection, budget guards, graceful halts.
 Author-email: Water Woods <woodwater2026@gmail.com>
 License: MIT
