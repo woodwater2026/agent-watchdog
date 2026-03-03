@@ -33,6 +33,7 @@ from agent_watchdog import AgentWatchdog
 watchdog = AgentWatchdog(
     max_budget_usd=1.0,       # halt if estimated cost exceeds $1
     max_identical_calls=3,    # halt if same tool+args called 3x in a row
+    pattern_window_size=8,    # also detect ABAB / ABCABC repeating patterns (0 = off)
     timeout_seconds=300,      # halt after 5 minutes
 )
 

@@ -80,12 +80,39 @@ def _args_hash(args: Any) -> str:
     return hashlib.md5(str(args).encode()).hexdigest()[:8]
 
 
+def _detect_repeating_pattern(window: list) -> list:
+    """
+    Return the shortest repeating subsequence that fills `window`, or [] if none.
+
+    Example: [A, B, A, B, A, B, A, B] → [A, B]
+             [A, B, C, A, B, C] → [A, B, C]
+             [A, B, C, D, ...] → [] (no pattern)
+
+    Only patterns of length 2..len(window)//2 are considered (need at least 2 repetitions).
+    """
+    n = len(window)
+    for pat_len in range(2, n // 2 + 1):
+        if n % pat_len != 0:
+            continue
+        pat = window[:pat_len]
+        reps = n // pat_len
+        if pat * reps == window:
+            return pat
+    return []
+
+
 class AgentWatchdog:
     """
     Framework-agnostic circuit breaker for AI agent runs.
 
-    Detects: infinite loops, budget overruns, timeouts.
+    Detects: infinite loops (identical or pattern-based), budget overruns, timeouts.
     On detect: raises WatchdogHalt with a structured report.
+
+    Loop detection modes (both are checked on every call):
+      - max_identical_calls: halt if the same (tool, args) appears N times in a row.
+        Maps to window_size in the CrewAI #4682 proposal.
+      - pattern_window_size: halt if a repeating subsequence fills a window of recent
+        calls. Catches ABAB, ABCABC, etc. Set to 0 to disable.
     """
 
     def __init__(
@@ -95,12 +122,14 @@ class AgentWatchdog:
         timeout_seconds: Optional[float] = 300,
         model: str = "default",
         warn_at_pct: float = 0.8,
+        pattern_window_size: int = 8,
     ):
         self.max_budget_usd = max_budget_usd
         self.max_identical_calls = max_identical_calls
         self.timeout_seconds = timeout_seconds
         self.model = model
         self.warn_at_pct = warn_at_pct
+        self.pattern_window_size = pattern_window_size
         self._current_run: Optional[RunState] = None
         self._timer: Optional[threading.Timer] = None
 
@@ -140,7 +169,7 @@ class AgentWatchdog:
     def record_tool_call(self, tool_name: str, args: Any = None, output: Any = None):
         """
         Call this each time the agent invokes a tool.
-        Detects loops. Thread-safe.
+        Detects identical-consecutive loops and repeating-pattern loops. Thread-safe.
         """
         if self._current_run is None:
             return
@@ -152,7 +181,7 @@ class AgentWatchdog:
         if output is not None:
             state.last_output = str(output)[:500]
 
-        # Loop detection: N identical consecutive (tool, args) pairs
+        # --- Mode 1: N identical consecutive (tool, args) pairs ---
         if len(state.tool_calls) >= self.max_identical_calls:
             tail = state.tool_calls[-self.max_identical_calls:]
             if len(set(tail)) == 1:
@@ -160,6 +189,19 @@ class AgentWatchdog:
                     state,
                     HaltReason.LOOP_DETECTED,
                     f"tool '{tool_name}' called {self.max_identical_calls}x identically",
+                )
+
+        # --- Mode 2: Sliding-window pattern detection (ABAB, ABCABC, etc.) ---
+        # Looks for the shortest repeating subsequence that perfectly fills a window.
+        if self.pattern_window_size >= 4 and len(state.tool_calls) >= self.pattern_window_size:
+            window = state.tool_calls[-self.pattern_window_size:]
+            pattern = _detect_repeating_pattern(window)
+            if pattern:
+                self._halt(
+                    state,
+                    HaltReason.LOOP_DETECTED,
+                    f"repeating pattern detected over last {self.pattern_window_size} calls "
+                    f"(pattern length {len(pattern)}): {[t for t, _ in pattern]}",
                 )
 
     def record_tokens(self, token_in: int = 0, token_out: int = 0):

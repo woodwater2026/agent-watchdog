@@ -82,3 +82,63 @@ def test_no_watch_context():
     wd = AgentWatchdog()
     wd.record_tool_call("anything", args="x")  # should not raise
     wd.record_tokens(1000, 500)  # should not raise
+
+
+# --- Pattern detection tests ---
+
+def test_pattern_detection_abab():
+    """ABAB alternating pattern should be caught by sliding-window detection."""
+    wd = AgentWatchdog(max_identical_calls=10, pattern_window_size=8)
+    with pytest.raises(WatchdogHalt) as exc_info:
+        with wd.watch("test-abab"):
+            for i in range(10):
+                tool = "search" if i % 2 == 0 else "read_page"
+                wd.record_tool_call(tool, args="same_query")
+    report = exc_info.value.report
+    assert report.reason == HaltReason.LOOP_DETECTED
+    assert "pattern" in report.message
+    assert len(report.tool_calls) == 8  # caught exactly at window fill
+
+
+def test_pattern_detection_abcabc():
+    """ABCABC 3-cycle pattern should be caught."""
+    wd = AgentWatchdog(max_identical_calls=10, pattern_window_size=6)
+    with pytest.raises(WatchdogHalt) as exc_info:
+        with wd.watch("test-abc"):
+            for i in range(10):
+                tool = ["search", "read", "write"][i % 3]
+                wd.record_tool_call(tool, args="q")
+    report = exc_info.value.report
+    assert report.reason == HaltReason.LOOP_DETECTED
+    assert len(report.tool_calls) == 6
+
+
+def test_pattern_detection_disabled():
+    """pattern_window_size=0 should disable pattern detection."""
+    wd = AgentWatchdog(max_identical_calls=10, pattern_window_size=0, timeout_seconds=5)
+    with wd.watch("test-no-pattern"):
+        for i in range(10):
+            tool = "search" if i % 2 == 0 else "read_page"
+            wd.record_tool_call(tool, args="same_query")
+    # Should NOT raise — pattern detection is disabled
+
+
+def test_no_false_positive_varied_calls():
+    """Non-repeating sequence should never trip pattern detection."""
+    wd = AgentWatchdog(max_identical_calls=10, pattern_window_size=8)
+    with wd.watch("test-varied"):
+        for i in range(8):
+            wd.record_tool_call(f"tool_{i}", args=f"unique_{i}")
+    # Should complete cleanly
+
+
+def test_detect_repeating_pattern_helper():
+    """Unit test for _detect_repeating_pattern directly."""
+    from agent_watchdog.watchdog import _detect_repeating_pattern
+
+    assert _detect_repeating_pattern([("A", "h"), ("B", "h"), ("A", "h"), ("B", "h")]) == [("A", "h"), ("B", "h")]
+    assert _detect_repeating_pattern([("A", "1"), ("B", "2"), ("C", "3")] * 2) == [("A", "1"), ("B", "2"), ("C", "3")]
+    # AAAA: shortest repeating unit at pat_len=2 is [A,A]; pat_len=1 not checked
+    # (single-identical handled by max_identical_calls, not pattern detection)
+    assert _detect_repeating_pattern([("A", "h")] * 4) == [("A", "h"), ("A", "h")]
+    assert _detect_repeating_pattern([("A", "1"), ("B", "2"), ("C", "3"), ("D", "4")]) == []
