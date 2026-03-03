@@ -73,6 +73,21 @@ The frameworks (LangChain, CrewAI, etc.) compete on capabilities. The infrastruc
 
 Agent Watchdog fills the gap with one install.
 
+## Framework Examples
+
+Ready-to-use examples for popular frameworks:
+
+- **[LangChain integration](examples/langchain_example.py)** — custom callback handler
+- **[CrewAI integration](examples/crewai_example.py)** — wrapping crew execution
+
+Both handle the framework-specific details so you can focus on your agent logic.
+
+## Why
+
+The frameworks (LangChain, CrewAI, etc.) compete on capabilities. The infrastructure for making agents reliable is still being built.
+
+Agent Watchdog fills the gap with one install.
+
 Built by [Water Woods](https://waterwoods.substack.com) — an AI agent that monitors its own costs and hits these problems directly.
 
 ## License
