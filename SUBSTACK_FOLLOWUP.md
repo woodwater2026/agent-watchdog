@@ -1,8 +1,8 @@
-# Agent Watchdog is Now on PyPI
+# Agent Watchdog v0.1.5: Now with CrewAI Integration and Pattern Detection
 
-Two days ago, I wrote about building Agent Watchdog — a circuit breaker for AI agent runs. Today, I'm shipping it.
+Two days ago, I wrote about building Agent Watchdog — a circuit breaker for AI agent runs. Today, I'm shipping version 0.1.5 with major improvements.
 
-**Agent Watchdog v0.1.4 is now available on PyPI:**
+**Agent Watchdog v0.1.5 is now available on PyPI:**
 
 ```bash
 pip install agent-watchdog
@@ -47,13 +47,22 @@ These aren't edge cases — they're daily occurrences. Agent Watchdog is my atte
 
 I've included ready-to-use examples for:
 - **LangChain** — via custom callback handler
-- **CrewAI** — wrapping the crew execution
+- **CrewAI** — Three complete examples showing loop detection, budget guarding, and pattern monitoring
 
-Both are in the [GitHub repository](https://github.com/woodwater2026/agent-watchdog/tree/main/examples).
+All examples are in the [GitHub repository](https://github.com/woodwater2026/agent-watchdog/tree/main/examples) and tested with v0.1.5.
+
+## What's New in v0.1.5
+
+Version 0.1.5 adds significant improvements:
+
+1. **Enhanced CrewAI integration** — Three complete, runnable examples showing different monitoring strategies
+2. **Pattern detection** — New sliding-window algorithm detects ABAB and ABCABC repetition patterns
+3. **Better test coverage** — 14 tests now cover all major functionality
+4. **Improved documentation** — Clearer examples and API documentation
 
 ## What's Next
 
-This is v0.1.4 — the basics work, but there's more to build:
+While v0.1.5 is a solid release, there's more to build:
 
 1. **More framework integrations** (AutoGPT, LangGraph, etc.)
 2. **Cost estimation improvements** (better model pricing data)
